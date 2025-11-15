@@ -1,5 +1,23 @@
-# Ignore virtual environment
+# Python env
 venv/
+__pycache__/
+*.pyc
 
-# Ignore raw + curated data
+# Data
 data/
+*.csv
+*.parquet
+
+# Spark / JVM
+.metastore/
+.derby/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
