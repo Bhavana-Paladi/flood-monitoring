@@ -11,10 +11,6 @@ def create_spark():
     return (
         SparkSession.builder
         .appName("flood-stream-alerts")
-        .config(
-            "spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
-        )
         .getOrCreate()
     )
 
