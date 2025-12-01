@@ -1,17 +1,32 @@
 from pyspark.sql import SparkSession, functions as F
 
-# ------------ CONFIG / PATHS ----------------
+# ---------------------------------------------------------
+# CONFIG: ALL PATHS SET TO ABSOLUTE FOR SPARK RELIABILITY
+# ---------------------------------------------------------
 
-# Just kept for later when we push curated data to GCS
+# GCS bucket (used later — not needed for VM runs)
 BUCKET_NAME = "flood-monitoring-bhavana-eu"
 
-# Raw data on the VM (what you downloaded with wget)
-ARCHIVE_PATH = "data/archive/readings-full-*.csv"
-STATIONS_PATH = "data/stations/stations_level.csv"
+# =======================
+# RAW / INPUT DATA PATHS
+# =======================
 
-# Curated outputs on the VM
-OUTPUT_BASELINE_LOCAL = "data/curated/batch_station_baseline"
-OUTPUT_DAILY_LOCAL = "data/curated/batch_station_daily"
+# Absolute path to historical CSVs
+ARCHIVE_PATH = "/home/b_paladi/flood-monitoring/data/archive"
+
+# Absolute path to stations metadata
+STATIONS_PATH = "/home/b_paladi/flood-monitoring/data/stations/stations_level.csv"
+
+# =======================
+# CURATED OUTPUT PATHS
+# =======================
+
+# Where the batch baseline parquet will be written
+OUTPUT_BASELINE_LOCAL = "/home/b_paladi/flood-monitoring/data/curated/batch_station_baseline"
+
+# Where the daily aggregated parquet will be written (optional job)
+OUTPUT_DAILY_LOCAL = "/home/b_paladi/flood-monitoring/data/curated/batch_station_daily"
+
 
 
 def main():

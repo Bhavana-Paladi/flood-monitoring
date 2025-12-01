@@ -1,117 +1,96 @@
-#!/usr/bin/env python3
 import csv
-import glob
 import json
 import os
 import time
 from kafka import KafkaProducer
 
-# Kafka config: you can override with env vars if needed
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "flood-readings")
+ARCHIVE_DIR = "data/archive"
+KAFKA_BOOTSTRAP = "localhost:9092"
+TOPIC = "flood-readings"
 
 
-def get_producer() -> KafkaProducer:
-    """
-    Create a Kafka producer that sends JSON-encoded messages.
-    """
+def get_producer():
     return KafkaProducer(
         bootstrap_servers=KAFKA_BOOTSTRAP,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        acks="all",
         linger_ms=50,
-        batch_size=32 * 1024,
+        batch_size=32_768,
     )
 
 
-def list_archive_files():
+def iter_archive_files():
     """
-    Return a sorted list of all readings-full-*.csv files in data/archive.
+    Yield CSV file paths in data/archive in sorted order by filename.
     """
-    files = sorted(glob.glob("data/archive/readings-full-*.csv"))
-    if not files:
-        raise RuntimeError(
-            "No files found matching data/archive/readings-full-*.csv. "
-            "Check that you downloaded the archive CSVs correctly."
-        )
-    return files
+    files = [
+        os.path.join(ARCHIVE_DIR, f)
+        for f in os.listdir(ARCHIVE_DIR)
+        if f.startswith("readings-full-") and f.endswith(".csv")
+    ]
+    return sorted(files, reverse=True)
 
 
-def clean_row(row: dict):
+def stream_file(producer, csv_path, sleep_between=0.01):
     """
-    Take a raw CSV row and:
-    - drop rows with missing or malformed value
-    - skip rows where value has '|' like '3.488|3.486'
-    - return a JSON-serialisable dict with only the fields the streaming job needs
+    Read one archive CSV and send only water-level rows to Kafka.
     """
-    raw_val = row.get("value")
+    print(f"Streaming file: {csv_path}")
+    sent = 0
 
-    # Drop empty, NaN or weird pipe-separated values
-    if raw_val in (None, "", "NaN"):
-        return None
-    if "|" in raw_val:
-        return None
+    with open(csv_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            # We only care about water *level* measurements
+            if row.get("parameter") != "level":
+                continue
 
-    try:
-        value = float(raw_val)
-    except ValueError:
-        return None
+            try:
+                level_value = float(row["value"])
+            except (ValueError, TypeError):
+                # Bad numeric value → skip
+                continue
 
-    # Only keep the columns the Spark stream_alerts.py expects
-    payload = {
-        "stationReference": row.get("stationReference"),
-        "dateTime": row.get("dateTime"),
-        "value": value,
-        "parameter": row.get("parameter"),
-        "qualifier": row.get("qualifier"),
-        "riverName": row.get("riverName"),
-        "catchmentName": row.get("catchmentName"),
-        "town": row.get("town"),
-    }
+            event = {
+                # Station identity
+                "stationReference": row.get("stationReference"),
+                "stationName": row.get("label"),
+                # Time
+                "timestamp": row.get("dateTime"),  # e.g. 2025-11-13T00:00:00Z
+                "date": row.get("date"),
+                # Measurement metadata
+                "unitName": row.get("unitName"),       # m, mASD, mAOD
+                "valueType": row.get("valueType"),     # instantaneous
+                "datumType": row.get("datumType"),     # datumAOD / datumASD / ""
+                # Actual water *level* in metres-ish
+                "level": level_value,
+            }
 
-    # Require at least stationReference + dateTime
-    if not payload["stationReference"] or not payload["dateTime"]:
-        return None
+            producer.send(TOPIC, event)
+            sent += 1
 
-    return payload
+            if sent % 1000 == 0:
+                print(f"  Sent {sent} messages so far...")
+
+            time.sleep(sleep_between)
+
+    print(f"Finished file {csv_path}, sent {sent} messages.")
 
 
 def main():
-    print(f"Connecting to Kafka at {KAFKA_BOOTSTRAP}, topic={KAFKA_TOPIC}")
     producer = get_producer()
 
-    files = list_archive_files()
-    print("Files to stream (in order):")
-    for f in files:
-        print(f"  - {f}")
+    files = iter_archive_files()
+    if not files:
+        print("No archive files found in data/archive")
+        return
 
-    total_sent = 0
-
+    # Stream all archive files once (you can limit if you want)
     for path in files:
-        print(f"\n=== Streaming file: {path} ===")
-        with open(path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                payload = clean_row(row)
-                if payload is None:
-                    continue
-
-                producer.send(KAFKA_TOPIC, value=payload)
-                total_sent += 1
-
-                if total_sent % 1000 == 0:
-                    print(f"Sent {total_sent} messages so far...")
-
-                # Small delay so it behaves like a stream, not a crazy burst
-                time.sleep(0.001)
-
-        # Flush after each file so everything gets sent
-        producer.flush()
-        print(f"Finished file {path}. Total sent so far: {total_sent}")
+        stream_file(producer, path, sleep_between=0.005)
 
     producer.flush()
     producer.close()
-    print(f"\n✅ Done. Total messages sent: {total_sent}")
+    print("Done streaming all archive files.")
 
 
 if __name__ == "__main__":

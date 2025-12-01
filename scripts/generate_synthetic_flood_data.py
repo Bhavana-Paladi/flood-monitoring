@@ -1,176 +1,262 @@
-import os
 import numpy as np
 import pandas as pd
+from pathlib import Path
+from datetime import datetime
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-N_STATIONS = 150
-START_DATE = "2024-01-01"
-END_DATE = "2024-12-31"   # 12 months
-OUTPUT_DIR = "data/synthetic"
+"""
+Synthetic flood data generator for UK stations.
+
+Outputs:
+- data/synthetic/synthetic_stations.csv
+- data/synthetic/synthetic_station_daily.csv
+
+Design goals:
+- 150 stations across UK with different rivers/catchments/towns
+- 12 months of daily readings
+- Mostly normal levels, but clear High / Very high events
+- Columns compatible with your existing BigQuery setup
+"""
 
 np.random.seed(42)
 
-# -----------------------------
-# HELPER DATA
-# -----------------------------
-regions = [
-    "North East", "North West", "Yorkshire & Humber", "Midlands",
-    "East of England", "South East", "South West", "Wales", "Scotland"
-]
 
-rivers = [
-    "River Thames", "River Trent", "River Severn", "River Ouse",
-    "River Tyne", "River Avon", "River Dee", "River Clyde",
-    "River Wear", "River Don", "River Wye", "River Eden"
-]
+def make_station_metadata(n_stations: int = 150) -> pd.DataFrame:
+    station_ids = [f"UK{idx:03d}" for idx in range(1, n_stations + 1)]
 
-catchments = [
-    "Upper Thames", "Lower Thames", "Trent Valley", "Severn Estuary",
-    "Humber Estuary", "Mersey Basin", "Clyde Basin", "Tyne Catchment"
-]
+    rivers = [
+        "River Thames", "River Severn", "River Trent", "River Mersey",
+        "River Tyne", "River Clyde", "River Avon", "River Ouse"
+    ]
+    catchments = [
+        "Thames Basin", "Severn Basin", "Trent Basin", "Mersey Basin",
+        "North East Coast", "North West Coast", "South East Coast"
+    ]
+    towns = [
+        "London", "Manchester", "Liverpool", "Birmingham",
+        "Leeds", "Sheffield", "Newcastle", "Bristol",
+        "Cardiff", "Glasgow", "Edinburgh", "Belfast"
+    ]
 
-towns = [
-    "London", "Oxford", "Reading", "Birmingham", "Manchester", "Leeds",
-    "Newcastle", "Cardiff", "Glasgow", "Bristol", "Norwich", "Sheffield",
-    "Nottingham", "Leicester", "Plymouth", "Exeter"
-]
+    # Rough bounding box around the UK
+    lat_min, lat_max = 50.0, 57.5
+    lon_min, lon_max = -5.5, 1.5
+
+    records = []
+    for sid in station_ids:
+        river = np.random.choice(rivers)
+        catchment = np.random.choice(catchments)
+        town = np.random.choice(towns)
+
+        # Risk profile controls how often this station floods
+        risk_profile = np.random.choice(
+            ["Low", "Medium", "High", "Very high"],
+            p=[0.5, 0.3, 0.15, 0.05]
+        )
+
+        # Base level (m) and variability
+        base_level = np.random.uniform(0.4, 1.6)
+        base_std = np.random.uniform(0.05, 0.25)
+
+        # Typical range and alert thresholds
+        typical_low = max(0.05, base_level - np.random.uniform(0.1, 0.4))
+        typical_high = base_level + np.random.uniform(0.2, 0.6)
+
+        alert_high = typical_high
+        alert_very_high = typical_high + base_std * np.random.uniform(1.2, 2.5)
+
+        lat = np.random.uniform(lat_min, lat_max)
+        lon = np.random.uniform(lon_min, lon_max)
+
+        records.append(
+            dict(
+                stationReference=sid,
+                stationName=f"{town} {river} Gauge",
+                riverName=river,
+                catchmentName=catchment,
+                town=town,
+                lat=round(lat, 5),
+                long=round(lon, 5),
+                typical_range_low=round(typical_low, 3),
+                typical_range_high=round(typical_high, 3),
+                status="active",
+                alert_threshold_high=round(alert_high, 3),
+                alert_threshold_very_high=round(alert_very_high, 3),
+                base_level=base_level,
+                base_std=base_std,
+                risk_profile=risk_profile,
+            )
+        )
+
+    return pd.DataFrame(records)
 
 
-def random_coord_in_uk():
-    """Rough bounding box around the UK."""
-    lat = np.random.uniform(50.0, 57.5)    # south–north
-    lon = np.random.uniform(-5.5, 1.5)     # west–east
-    return lat, lon
+def generate_daily_readings(
+    stations: pd.DataFrame,
+    start_date: str = "2024-11-01",
+    n_days: int = 365,
+) -> pd.DataFrame:
+    dates = pd.date_range(start=start_date, periods=n_days, freq="D")
+    all_rows = []
+
+    for _, row in stations.iterrows():
+        sid = row["stationReference"]
+        base_level = row["base_level"]
+        base_std = row["base_std"]
+        typical_low = row["typical_range_low"]
+        typical_high = row["typical_range_high"]
+        alert_high = row["alert_threshold_high"]
+        alert_very_high = row["alert_threshold_very_high"]
+        risk_profile = row["risk_profile"]
+
+        # Seasonal amplitude: wetter winter, slightly higher levels
+        seasonal_amp = np.random.uniform(0.05, 0.3)
+
+        # Number of storm windows depends on risk profile
+        profile_to_storms = {
+            "Low": (1, 2),
+            "Medium": (2, 3),
+            "High": (3, 4),
+            "Very high": (4, 5),
+        }
+        min_storms, max_storms = profile_to_storms[risk_profile]
+        n_storms = np.random.randint(min_storms, max_storms + 1)
+
+        storm_days = set()
+        for _ in range(n_storms):
+            start_idx = np.random.randint(0, n_days - 7)
+            length = np.random.randint(2, 5)
+            for d_idx in range(start_idx, start_idx + length):
+                storm_days.add(d_idx)
+
+        # How strong storms are relative to base_std
+        profile_to_mult = {
+            "Low": 1.5,
+            "Medium": 2.0,
+            "High": 2.5,
+            "Very high": 3.0,
+        }
+        storm_mult = profile_to_mult[risk_profile]
+
+        for idx, d in enumerate(dates):
+            day_of_year = d.timetuple().tm_yday
+            season = seasonal_amp * np.sin(2 * np.pi * day_of_year / 365.0)
+
+            noise = np.random.normal(0, base_std)
+            level = base_level + season + noise
+
+            # Storm boost
+            if idx in storm_days:
+                level += storm_mult * base_std
+
+            level = max(0.05, level)
+
+            # Classify risk for this reading
+            if level >= alert_very_high:
+                flood_risk = "Very high"
+            elif level >= alert_high:
+                flood_risk = "High"
+            elif level >= typical_high:
+                flood_risk = "Medium"
+            else:
+                flood_risk = "Low"
+
+            all_rows.append(
+                dict(
+                    stationReference=sid,
+                    date=d.date().isoformat(),
+                    level=round(float(level), 3),
+                    typical_range_low=typical_low,
+                    typical_range_high=typical_high,
+                    flood_risk=flood_risk,
+                )
+            )
+
+    daily = pd.DataFrame(all_rows)
+    return daily
 
 
-# -----------------------------
-# 1. CREATE STATION BASELINE
-# -----------------------------
-stations = []
-for i in range(N_STATIONS):
-    station_ref = f"UK{(i+1):03d}"
-    region = np.random.choice(regions)
-    river = np.random.choice(rivers)
-    catchment = np.random.choice(catchments)
-    town = np.random.choice(towns)
+def summarize_stations(daily: pd.DataFrame, stations_meta: pd.DataFrame) -> pd.DataFrame:
+    # Aggregate daily readings into station-level stats for station_baseline
+    agg = (
+        daily.groupby("stationReference")["level"]
+        .agg(
+            n_readings_total="count",
+            mean_level_total="mean",
+            std_level_total="std",
+            p05_level=lambda s: s.quantile(0.05),
+            median_level="median",
+            p95_level=lambda s: s.quantile(0.95),
+        )
+        .reset_index()
+    )
 
-    # Typical range: low between 0.2–1.5m, range width between 0.8–2.0m
-    typical_low = np.round(np.random.uniform(0.2, 1.5), 2)
-    typical_high = np.round(typical_low + np.random.uniform(0.8, 2.0), 2)
+    # Most common flood risk label per station
+    risk = (
+        daily.groupby(["stationReference", "flood_risk"])
+        .size()
+        .reset_index(name="n")
+    )
+    risk = risk.sort_values(["stationReference", "n"], ascending=[True, False])
+    risk = risk.drop_duplicates("stationReference")[["stationReference", "flood_risk"]]
+    risk = risk.rename(columns={"flood_risk": "label"})
 
-    lat, lon = random_coord_in_uk()
+    # Merge metadata + stats + label
+    baseline = (
+        stations_meta.merge(agg, on="stationReference")
+        .merge(risk, on="stationReference")
+    )
 
-    stations.append({
-        "stationReference": station_ref,
-        "riverName": river,
-        "catchmentName": catchment,
-        "town": town,
-        "region": region,
-        "latitude": round(lat, 5),
-        "longitude": round(lon, 5),
-        "typical_range_low": typical_low,
-        "typical_range_high": typical_high
-    })
+    # Round some numeric columns for nicer tables
+    for col in [
+        "mean_level_total",
+        "std_level_total",
+        "p05_level",
+        "median_level",
+        "p95_level",
+    ]:
+        baseline[col] = baseline[col].round(3)
 
-df_stations = pd.DataFrame(stations)
+    # Drop internal columns
+    baseline = baseline.drop(columns=["base_level", "base_std", "risk_profile"])
 
-# -----------------------------
-# 2. CREATE DAILY LEVELS (1 YEAR)
-# -----------------------------
-dates = pd.date_range(START_DATE, END_DATE, freq="D")
-rows = []
+    return baseline
 
-# assign a phase per region so their seasonality is not identical
-region_phase = {
-    r: np.random.uniform(0, 2 * np.pi) for r in regions
-}
 
-for _, s in df_stations.iterrows():
-    station_ref = s["stationReference"]
-    region = s["region"]
-    river = s["riverName"]
-    catchment = s["catchmentName"]
-    town = s["town"]
-    low = s["typical_range_low"]
-    high = s["typical_range_high"]
+def main():
+    base_dir = Path(__file__).resolve().parents[1]
+    out_dir = base_dir / "data" / "synthetic"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # base level around middle of typical range
-    base_mid = (low + high) / 2
+    print("Generating station metadata...")
+    stations = make_station_metadata()
+    print(f"  -> {len(stations)} stations")
 
-    # For each station, random number of flood events
-    n_events = np.random.randint(2, 6)  # 2–5 events per year
-    event_days = np.random.choice(len(dates), size=n_events, replace=False)
+    print("Generating daily readings (12 months)...")
+    daily = generate_daily_readings(stations, start_date="2024-11-01", n_days=365)
+    print(f"  -> {len(daily)} daily rows")
 
-    for idx, d in enumerate(dates):
-        day_of_year = d.timetuple().tm_yday
+    print("Summarizing station baselines...")
+    baseline = summarize_stations(daily, stations)
 
-        # Seasonal factor: wetter winter / early spring, drier summer
-        phase = region_phase[region]
-        seasonal = 0.3 * np.sin(2 * np.pi * day_of_year / 365 + phase)
+    stations_path = out_dir / "synthetic_stations.csv"
+    daily_path = out_dir / "synthetic_station_daily.csv"
 
-        # Random noise
-        noise = np.random.normal(loc=0.0, scale=0.15)
+    print(f"Writing station baseline -> {stations_path}")
+    baseline.to_csv(stations_path, index=False)
 
-        level = base_mid + seasonal * (high - low) + noise
+    print(f"Writing daily readings  -> {daily_path}")
+    daily.to_csv(daily_path, index=False)
 
-        # Occasionally create flood spikes
-        if idx in event_days:
-            spike = np.random.uniform(0.6, 1.8) * (high - low)
-            level += spike
+    # Quick sanity check summary
+    print("\nExample baseline rows:")
+    print(baseline.head())
 
-        # Clip to non-negative
-        level = max(0.0, level)
+    print("\nOverall daily level distribution:")
+    print(daily["level"].describe())
 
-        # Flood risk category
-        if level <= high:
-            risk = "Low"
-        elif level <= high + 0.3:
-            risk = "Medium"
-        elif level <= high + 0.7:
-            risk = "High"
-        else:
-            risk = "Severe"
+    print("\nFlood risk distribution:")
+    print(daily["flood_risk"].value_counts(normalize=True).round(3))
 
-        # Useful derived metrics
-        level_minus_low = level - low
-        level_minus_high = level - high
-        pct_of_range = (level - low) / (high - low) * 100
 
-        rows.append({
-            "stationReference": station_ref,
-            "date": d.date().isoformat(),
-            "level": round(level, 3),
-            "typical_range_low": low,
-            "typical_range_high": high,
-            "level_minus_low": round(level_minus_low, 3),
-            "level_minus_high": round(level_minus_high, 3),
-            "pct_of_range": round(pct_of_range, 1),
-            "flood_risk": risk,
-            "riverName": river,
-            "catchmentName": catchment,
-            "town": town,
-            "region": region
-        })
-
-df_daily = pd.DataFrame(rows)
-
-# -----------------------------
-# 3. WRITE TO CSV
-# -----------------------------
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-stations_path = os.path.join(OUTPUT_DIR, "synthetic_stations.csv")
-daily_path = os.path.join(OUTPUT_DIR, "synthetic_station_daily.csv")
-
-df_stations.to_csv(stations_path, index=False)
-df_daily.to_csv(daily_path, index=False)
-
-print(f"Written station baseline -> {stations_path}")
-print(f"Written daily station levels -> {daily_path}")
-print("Example station:")
-print(df_stations.head(3))
-print("Example daily rows:")
-print(df_daily.head(5))
-
+if __name__ == "__main__":
+    main()
