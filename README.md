@@ -27,5 +27,4 @@ This project implements flood monitoring data pipelines using PySpark, Google Cl
 - `flood_monitoring.station_baseline` ← `curated/batch_station_baseline/*.parquet`
 - `flood_monitoring.station_daily`   ← `curated/batch_station_daily/*.parquet`
 
-These two tables are used as inputs for the dashboard and for the streaming alert pipeline (next steps).
-# flood-monitoring
+These two tables are used as inputs for the dashboard and for the streaming alert pipeline.
